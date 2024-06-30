@@ -1,3 +1,4 @@
+import copy
 from threading import Thread
 from typing import Dict, Iterator, List, Optional
 
@@ -96,7 +97,7 @@ class OpenVINO(BaseTextChatModel):
         generate_cfg: dict,
     ) -> Iterator[List[Message]]:
         from transformers import TextIteratorStreamer
-
+        generate_cfg = copy.deepcopy(generate_cfg)
         prompt = self._build_text_completion_prompt(messages)
         logger.debug(f'*{prompt}*')
         input_token = self.tokenizer(prompt, return_tensors='pt').input_ids
@@ -118,13 +119,17 @@ class OpenVINO(BaseTextChatModel):
         partial_text = ''
         for new_text in streamer:
             partial_text += new_text
-            yield [Message(ASSISTANT, partial_text)]
+            if delta_stream:
+                yield [Message(ASSISTANT, new_text)]
+            else:
+                yield [Message(ASSISTANT, partial_text)]
 
     def _chat_no_stream(
         self,
         messages: List[Message],
         generate_cfg: dict,
     ) -> List[Message]:
+        generate_cfg = copy.deepcopy(generate_cfg)
         prompt = self._build_text_completion_prompt(messages)
         logger.debug(f'*{prompt}*')
         input_token = self.tokenizer(prompt, return_tensors='pt').input_ids

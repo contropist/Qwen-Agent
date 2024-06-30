@@ -17,6 +17,7 @@ from qwen_agent.tools import BaseTool
 from qwen_agent.tools.doc_parser import DocParser
 from qwen_agent.tools.simple_doc_parser import PARSER_SUPPORTED_FILE_TYPES
 from qwen_agent.utils.parallel_executor import parallel_exec
+from qwen_agent.utils.tokenization_qwen import count_tokens
 from qwen_agent.utils.utils import (extract_files_from_messages, extract_text_from_message, get_file_type,
                                     print_traceback)
 
@@ -83,12 +84,19 @@ class ParallelDocQA(Assistant):
         self,
         messages: List[Message],
         lang: str = 'en',
-        query: str = '',
+        user_question: str = '',
+        member_res: str = '',
     ):
         messages = copy.deepcopy(messages)
         valid_files = self._get_files(messages)
 
         keygen = GenKeyword(llm=self.llm)
+        member_res_token_num = count_tokens(member_res)
+
+        # Limit the token length of keygen input to avoid wasting tokens due to excessively long docqa member output.
+        unuse_member_res = member_res_token_num > MAX_RAG_TOKEN_SIZE
+        query = user_question if unuse_member_res else f'{user_question}\n\n{member_res}'
+
         try:
             *_, last = keygen.run([Message(USER, query)])
         except ModelServiceError:
@@ -105,22 +113,27 @@ class ParallelDocQA(Assistant):
             logger.info(keyword)
             keyword_dict = json5.loads(keyword)
             keyword_dict['text'] = query
-            query = json.dumps(keyword_dict, ensure_ascii=False)
+            if unuse_member_res:
+                keyword_dict['text'] += '\n\n' + member_res
+            rag_query = json.dumps(keyword_dict, ensure_ascii=False)
         except Exception:
-            query = query
+            rag_query = query
+            if unuse_member_res:
+                rag_query += '\n\n' + member_res
 
         # max_ref_token is the retrieve doc token size
         # parser_page_size is the chunk size in retrieve
 
-        retrieve_content = self._call_tool(
-            'retrieval',
+        retrieve_content = self.function_map['retrieval'].call(
             {
-                'query': query,
+                'query': rag_query,
                 'files': valid_files
             },
             max_ref_token=MAX_RAG_TOKEN_SIZE,
             parser_page_size=RAG_CHUNK_SIZE,
         )
+        if not isinstance(retrieve_content, str):
+            retrieve_content = json.dumps(retrieve_content, ensure_ascii=False, indent=4)
 
         retrieve_content = format_knowledge_to_source_and_content(retrieve_content)
 
@@ -218,12 +231,10 @@ class ParallelDocQA(Assistant):
                 break
             retry_cnt -= 1
 
-        if len(filtered_results) == 0:
-            query = user_question
-        else:
-            query = user_question + '\n\n' + member_res
-
-        retrieve_content = self._retrieve_according_to_member_responses(messages=messages, lang=lang, query=query)
+        retrieve_content = self._retrieve_according_to_member_responses(messages=messages,
+                                                                        lang=lang,
+                                                                        user_question=user_question,
+                                                                        member_res=member_res)
         return self.summary_agent.run(messages=messages, lang=lang, knowledge=retrieve_content)
 
     def _ask_member_agent(self,
